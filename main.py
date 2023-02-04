@@ -1,114 +1,77 @@
 import torch
 import torchaudio
-from torchsummaryX import summary
-
 import pandas as pd
 import numpy as np
-
 import random
 from sklearn.model_selection import train_test_split
-
 import glob
 import gc
 from tqdm import tqdm
-
 import matplotlib.pyplot as plt
+import config
+import data
 
-DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-feature_names = [
-    'Loudness_sma3',
-    'alphaRatio_sma3',
-    'hammarbergIndex_sma3',
-    'slope0-500_sma3',
-    'slope500-1500_sma3',
-    'spectralFlux_sma3',
-    'mfcc1_sma3',
-    'mfcc2_sma3',
-    'mfcc3_sma3',
-    'mfcc4_sma3',
-    'F0semitoneFrom27.5Hz_sma3nz',
-    'jitterLocal_sma3nz',
-    'shimmerLocaldB_sma3nz',
-    'HNRdBACF_sma3nz',
-    'logRelF0-H1-H2_sma3nz',
-    'logRelF0-H1-A3_sma3nz',
-    'F1frequency_sma3nz',
-    'F1bandwidth_sma3nz',
-    'F1amplitudeLogRelF0_sma3nz',
-    'F2frequency_sma3nz',
-    'F2bandwidth_sma3nz',
-    'F2amplitudeLogRelF0_sma3nz',
-    'F3frequency_sma3nz',
-    'F3bandwidth_sma3nz',
-    'F3amplitudeLogRelF0_feature_names']
-    
-feature_names = ['CLEAN_' + feature for feature in feature_names] + ['NOISY_' + feature for feature in feature_names]
-feature_names
+### TODOs ###
+# TODO make sure the model loads correctly. might need to find that other file that has the architecture *done*
+# TODO identify the right mapping between acoustics and waveforms *done*
+# TODO add spectrogram conversion to dataset *done*
+# TODO figure out the way to adjust the input in the direction of the gradient
 
-clean_acoustic_paths = sorted(glob.glob('/media/konan/DataDrive/temp/toy-acoustic/acoustic/clean/*/*.npy'))
-noisy_acoustic_paths = sorted(glob.glob('/media/konan/DataDrive/temp/toy-acoustic/acoustic/noisy/*/*.npy'))
-
-
-evaluation_metrics_paths = '/media/konan/DataDrive/temp/toy-acoustic/eval_metrics/metrics_noisy(toy).csv'
-
-total_nums = len(clean_acoustic_paths)
-print(total_nums)
-
-def get_relative_acoustic(clean_acoustic_paths, noisy_acoustic_paths):
-    
-    mu = np.array(
-            [ 2.31615782e-01, -5.02114248e+00,  7.16793156e+00,  1.40047576e-02,
-             -1.44424592e-03,  1.18291244e-01,  7.16937304e+00,  5.01161051e+00,
-              7.38044071e+00,  1.30544746e+00,  7.16783571e+00,  7.72617990e-03,
-              3.78611624e-01,  1.80594587e+00,  2.74223471e+00,  7.16790104e+00,
-              2.29371735e+02,  2.61031281e+02, -2.86713428e+01,  4.58741486e+02,
-              2.72984955e+02, -2.86713428e+01,  4.58874390e+02,  2.71175812e+02,
-             -2.86713428e+01], dtype=np.float32)
-    std = np.array(
-            [ 4.24716711e-01, 1.09750290e+01, 1.51086359e+01, 2.98775751e-02,
-              1.85245797e-02, 2.39421308e-01, 1.63376312e+01, 1.22261524e+01,
-              1.53735695e+01, 1.42613926e+01, 1.21981163e+01, 2.58955006e-02,
-              8.05543840e-01, 3.83967781e+00, 6.79308844e+00, 1.41308403e+01,
-              3.49271667e+02, 6.28384338e+02, 6.05799637e+01, 6.89079407e+02,
-              5.62089905e+02, 6.05799637e+01, 1.09140088e+03, 5.42341919e+02,
-              6.05799637e+01], dtype=np.float32)
-    
-    clean_acoustic = torch.tensor(np.asarray([np.load(p) for p in tqdm(clean_acoustic_paths)]))
-    noisy_acoustic = torch.tensor(np.asarray([np.load(p) for p in tqdm(noisy_acoustic_paths)]))
-    
-    # Normalization
-    clean_acoustic = (clean_acoustic - mu) / std
-    noisy_acoustic = (noisy_acoustic - mu) / std 
-    
-    # Because PESQ and STOI are relative evaluation metrics, the input must include both clean and noisy(enhanced) acoustic.
-    acoustic = torch.cat((clean_acoustic, noisy_acoustic), 2)
-    
-    return acoustic
-
-class ToyDataset(torch.utils.data.Dataset):
-
+class AcousticEstimator(torch.nn.Module):
     def __init__(self):
+        super(AcousticEstimator, self).__init__()
+        self.lstm = torch.nn.LSTM(642, 256, 4, bidirectional=True, batch_first=True)
+        self.linear1 = torch.nn.Linear(512, 256)
+        self.linear2 = torch.nn.Linear(256, 128)
+        self.linear3 = torch.nn.Linear(128, 25)
+        self.act = torch.nn.ReLU()
         
-        self.acoustic              = get_relative_acoustic(clean_acoustic_paths, noisy_acoustic_paths)
-        self.evaluation_metrics    = np.asarray(pd.read_csv(evaluation_metrics_paths).loc[:, ['pesq', 'stoi']])
-        self.evaluation_metrics    = torch.tensor(self.evaluation_metrics)
-        
-        assert len(self.evaluation_metrics) == len(self.acoustic)
-        
-        self.length = len(self.evaluation_metrics)
-        
+    def forward(self, A0):
+        A1, _ = self.lstm(A0)
+        Z1 = self.linear1(A1)
+        A2 = self.act(Z1)
+        Z2 = self.linear2(A2)
+        out = self.act(Z2)
+        out = self.linear3(out)
+        return out 
 
-        
-    def __len__(self):
+class Cradle(torch.nn.Module):
+    def __init__(self, model):
+        super(Cradle, self).__init__()
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") 
+        self.optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+        self.loss_fn = torch.nn.MSELoss()
+        self.model = model.to(self.device)
 
-        return self.length
+    def train(self, dataloader):
+        self.model.train()
+        for i, (x, y) in enumerate(dataloader):
+            breakpoint()
+            x = x.to(self.device) 
+            x.requires_grad = True  # need input grad for adversarial  
+            y = y.to(self.device)
+            y_hat = self.model(x)
+            loss = self.loss_fn(y_hat, y)
+            self.optimizer.zero_grad()
+            loss.backward()
+            # adjust the input in the direction of the gradient
+            self.optimizer.step()
+            if i % 10 == 0:
+                print(f'Epoch {i}: {loss.item()}')
+        return 0
 
-    def __getitem__(self, i):
 
-        x = self.acoustic[i]
-        y = self.evaluation_metrics[i]
-        
-        return x, y
+def main():
+    dataset = data.ToyDataset()
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
+    # load model from config.model_path
+    model = AcousticEstimator()
+    model_ckpt = torch.load(config.model_path)
+    model.load_state_dict(model_ckpt['model_state_dict'])
+    # create Cradle 
+    cradle = Cradle(model)
+    cradle.train(dataloader)
+    return 0 
 
-
-
+if __name__ == '__main__':
+    main()
