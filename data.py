@@ -8,8 +8,8 @@ import tqdm
 
 class ToyDataset(torch.utils.data.Dataset):
     def __init__(self):
+        # TODO the files match 1-1 right now but this might change in the future
         self.acoustics = self.get_acoustics()
-        # TODO load waveforms 
         self.waveforms = self.get_waveforms()
         self.nfft = 640
         self.hop_length = 160
@@ -18,14 +18,12 @@ class ToyDataset(torch.utils.data.Dataset):
         mu, std = config.mu, config.std
         clean_acoustic_paths = sorted(glob.glob(f'{config.acoustic_dir}/*/*.npy'))
         clean_acoustics = torch.tensor(np.asarray([np.load(p) for p in tqdm.tqdm(clean_acoustic_paths)]))
-        # Normalization
         clean_acoustics = (clean_acoustics - mu) / std
         return clean_acoustics
 
     def get_waveforms(self):
         clean_waveform_paths = sorted(glob.glob(f'{config.waveform_dir}/*/*.wav'))
         # TODO depending on how big this is, might need to just store the paths and load them in the getitem function
-        # read in each waveform using torchaudio and store it in a list
         wavs = []
         for p in tqdm.tqdm(clean_waveform_paths):
             wav, sr = torchaudio.load(p)

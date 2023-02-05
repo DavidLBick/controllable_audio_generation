@@ -5,7 +5,7 @@ batch_size = 1
 model_path = "./hamming_lld_estimator_13mse_13mae.pt"
 waveform_dir = "/media/konan/DataDrive/temp/toy-acoustic/waveform/clean/"
 acoustic_dir = "/media/konan/DataDrive/temp/toy-acoustic/acoustic/clean/"
-feature_names = [
+acoustic_features = [
     'Loudness_sma3',
     'alphaRatio_sma3',
     'hammarbergIndex_sma3',
