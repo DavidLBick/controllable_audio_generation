@@ -34,23 +34,68 @@ class Cradle(torch.nn.Module):
     def __init__(self, model):
         super(Cradle, self).__init__()
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") 
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
         self.loss_fn = torch.nn.MSELoss()
         self.model = model.to(self.device)
+        self.patience = 20  # TODO adjust 
+        self.cost_threshold = 0.1  # TODO adjust 
+        self.tolerance = 0.01  # TODO adjust
 
-    def vary_one_feature(self, audio, acoustic, feature_idx, multiplier):
-        # TODO might want to use something else for std
+    def vary_one_feature(self, spec, feature_idx, multiplier):
+        lr = 1
+        acoustic = self.model(spec)  # TODO seems like they are normalized, but should confirm
+        feat_std = torch.std(acoustic[:, :, feature_idx])
+        varied_acstc = acoustic.clone().to(self.device)
+        varied_acstc[:, :, feature_idx] += multiplier * feat_std  # TODO might want to use something else for std
+        cost = self.loss_fn(acoustic, varied_acstc)
+        grad = torch.autograd.grad(cost, spec,
+                                   retain_graph=False, create_graph=False)[0]  # credit to https://github.com/Harry24k/adversarial-attacks-pytorch/blob/master/torchattacks/attacks/fgsm.py
+        step = 0
+        repeats = 0
+        while abs(cost) > self.cost_threshold:
+            print(cost, step)
+            #breakpoint()
+            spec = spec - lr * grad.sign()
+            acstc_i = self.model(spec)
+            prev_cost = cost.detach().clone()
+            cost = self.loss_fn(acstc_i, varied_acstc)
+            if abs(cost - prev_cost) < self.tolerance:
+                if repeats > self.patience:
+                    lr = lr / 2
+                    # clamp lr to min 0.001
+                    if lr < 0.1:
+                        lr = 0.1
+                    repeats = 0
+                else:
+                    repeats += 1
+            grad = torch.autograd.grad(cost, spec,
+                                        retain_graph=False, create_graph=False)[0]
+            step += 1
+        adv_spec = spec.detach()
+        return adv_spec
+
+    def vary_one_feature_optimizer(self, spec, feature_idx, multiplier):
+        optim = torch.optim.Adam([spec], lr=0.75)
+        acoustic = self.model(spec)  # TODO seems like they are normalized, but should confirm
         feat_std = torch.std(acoustic[:, :, feature_idx])
         varied_acstc = acoustic.clone().to(self.device)
         varied_acstc[:, :, feature_idx] += multiplier * feat_std
-        breakpoint()
-        cost = -self.loss_fn(acoustic, varied_acstc)
-        grad = torch.autograd.grad(cost, audio,
+        cost = self.loss_fn(acoustic, varied_acstc)
+        grad = torch.autograd.grad(cost, spec,
                                    retain_graph=False, create_graph=False)[0]  # credit to https://github.com/Harry24k/adversarial-attacks-pytorch/blob/master/torchattacks/attacks/fgsm.py
-
-        # TODO might have to play with iterative or other methods                                    
-        adv_audio = audio + self.eps * grad.sign()
-        return adv_audio
+        step = 0
+        optim.step()    
+        optim = torch.optim.Adam([spec], lr=0.75)
+        while abs(cost) > self.cost_threshold:
+            print(cost, step)
+            acstc_i = self.model(spec)
+            prev_cost = cost.clone()
+            cost = self.loss_fn(acstc_i, varied_acstc)
+            grad = torch.autograd.grad(cost, spec, retain_graph=False, create_graph=False)[0]
+            optim.step()
+            optim = torch.optim.Adam([spec], lr=0.75)
+            step += 1
+        adv_spec = spec.detach()
+        return adv_spec
 
     def cntrl_gen(self, dataloader):
         self.model.train()
@@ -58,23 +103,23 @@ class Cradle(torch.nn.Module):
         for feature_idx in range(0, len(config.acoustic_features)):
             feature = config.acoustic_features[feature_idx]
             gen_features[feature] = []
-            for i, (spec, gt_acstc) in enumerate(dataloader):
+            for i, (spec, gt_acstc) in tqdm(enumerate(dataloader)):
                 if i > 3:
                     break
                 spec = spec.to(self.device) 
                 spec.requires_grad = True  # need input grad for adversarial  
                 gt_acstc = gt_acstc.to(self.device)  # TODO why is # of time steps different for gt_acstc and estimated
                 spec_atcks = []
-                estimated_acstc = self.model(spec)  # TODO seems like they are normalized, but should confirm
-                for multiplier in range(-5, 5):
-                    gen_audio = self.vary_one_feature(spec, estimated_acstc, feature_idx, multiplier)
-                    spec_atcks.append(gen_audio)
+                """for multiplier in range(-5, 5):
+                    gen_audio = self.vary_one_feature_optimizer(spec, feature_idx, multiplier)
+                    spec_atcks.append(gen_audio)"""
+                gen_audio = self.vary_one_feature(spec, feature_idx, 5)
                 gen_features[feature].append(spec_atcks)
         return 0
 
 def main():
     dataset = data.ToyDataset()
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, shuffle=False)
     model = AcousticEstimator()
     model_ckpt = torch.load(config.model_path)
     model.load_state_dict(model_ckpt['model_state_dict'])
