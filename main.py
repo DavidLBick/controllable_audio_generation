@@ -61,9 +61,8 @@ class Cradle(torch.nn.Module):
             if abs(cost - prev_cost) < self.tolerance:
                 if repeats > self.patience:
                     lr = lr / 2
-                    # clamp lr to min 0.001
-                    if lr < 0.1:
-                        lr = 0.1
+                    # clamp lr 
+                    lr = lr.clamp(min=0.01, max=1)
                     repeats = 0
                 else:
                     repeats += 1
